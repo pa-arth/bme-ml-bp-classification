@@ -28,66 +28,35 @@ If those four files exist, I uncomment one block in `04_results.ipynb` and the c
 - **Subject-level splits** — `bme_ml/splits.py`. Persisted as `data/processed/splits.json`. **You must reuse these splits** so test sets match.
 - **Labels** — both `label_binary` and `label_3class` (AHA: Normal SBP<120∧DBP<80 / Elevated 120-129 SBP∧DBP<80 / Hypertensive SBP≥130∨DBP≥80) live in `features.parquet`.
 - **Multi-class metrics** — `bme_ml/evaluation.py:evaluate_multiclass`. **Use this** so your numbers are comparable.
+- **Kachuee feature extraction** — already implemented in `bme_ml/features.py`. Import the constant `KACHUEE_FEATURES` (10 features: `ptt_ms` (PTTp), `pttf_ms`, `pttd_ms`, `hr_bpm`, `ai_kachuee`, `lasi_ms`, `s1_area`, `s2_area`, `s3_area`, `s4_area`). The diastolic-peak detector and S1–S4 area integrals are in `bme_ml/features.py:_find_pulse_landmarks` and the per-cycle loop above it.
 
 ## What you need to implement
 
-### 1. Add the missing Kachuee features to `bme_ml/features.py`
-
-The paper's feature set is **10 features**, of which we currently extract only 2 cleanly (`ptt_ms` ≈ PTTp, `hr_bpm`). The other 8 are missing or wrong. Add these:
-
-| Kachuee | Variable name to add | What it is |
-|---|---|---|
-| **PTTp** | `pttp_ms` | R-peak → next PPG **systolic peak** time. (We already have this as `ptt_ms` — rename for clarity.) |
-| **PTTf** | `pttf_ms` | R-peak → next PPG **foot/minimum** (start of upstroke). |
-| **PTTd** | `pttd_ms` | R-peak → next PPG **maximum-slope point** (peak of dPPG/dt during upstroke). |
-| **HR** | `hr_bpm` | Heart rate from peak-to-peak (already have it). |
-| **AI** | `ai_kachuee` | Diastolic peak amplitude / systolic peak amplitude — the **secondary post-dicrotic-notch peak**, NOT the dicrotic notch itself. Our current `ppg_aug_index` is wrong on this and uses the notch. Replace it. |
-| **LASI** | `lasi_ms` | Time interval between **systolic peak** and **diastolic peak** (within one cardiac cycle). |
-| **S1** | `s1_area` | Area under PPG curve from **foot → systolic peak**. |
-| **S2** | `s2_area` | Area under PPG curve from **systolic peak → dicrotic notch**. |
-| **S3** | `s3_area` | Area under PPG curve from **dicrotic notch → diastolic peak**. |
-| **S4** | `s4_area` | Area under PPG curve from **diastolic peak → next foot**. |
-
-The hard part is **diastolic-peak detection**. NeuroKit2's `ppg_process` returns systolic peaks but not diastolic. Approach:
-
-1. For each cardiac cycle (between two consecutive PPG troughs):
-2. Find the systolic peak (already detected by NeuroKit).
-3. On the descending limb (peak → next foot), compute the second derivative of the smoothed PPG.
-4. The **dicrotic notch** is the first local maximum of d²PPG/dt² after the systolic peak (a.k.a. the inflection where curvature reverses from concave-down to concave-up).
-5. The **diastolic peak** is the next local maximum of the PPG signal itself after the notch (or, if no clear peak exists for that pulse, the next local maximum of d²PPG/dt² — and skip the cycle for AI/LASI/S2-S4 if neither resolves).
-
-Per-cycle, return median across cycles in the segment (consistent with how the existing features are aggregated).
-
-**Sanity checks**:
-- `pttp_ms > pttd_ms > pttf_ms` should hold per cycle (foot first, then max-slope, then peak).
-- `s1 + s2 + s3 + s4` should approximately equal the total area under the PPG cycle (above its foot baseline).
-- `ai_kachuee` typically lies in [0.3, 0.9] for healthy adults.
-
-Once added, update `FEATURE_NAMES` in `features.py` and add two named subsets:
-
-```python
-KACHUEE_FEATURES = [
-    "pttp_ms", "pttf_ms", "pttd_ms", "hr_bpm",
-    "ai_kachuee", "lasi_ms",
-    "s1_area", "s2_area", "s3_area", "s4_area",
-]
-OUR_FEATURES = KACHUEE_FEATURES + [
-    "rr_sd_ms", "hrv_rmssd_ms", "hrv_sdnn_ms",
-    "ppg_pw50_ms", "ppg_pw25_ms", "ppg_rise_ms",
-    "ppg_decay_ms", "ecg_qrs_ms",
-]
-```
-
-### 2. Re-run feature extraction
+### 1. Re-run feature extraction (one command)
 
 ```bash
 # In a fresh terminal, with the project's venv active:
 jupyter nbconvert --to notebook --execute --inplace notebooks/02_build_features.ipynb
 ```
 
-This regenerates `features.parquet` with the new columns. **Set `MAX_RECORDS = None`** for the full dataset (~30–60 min on a decent CPU).
+This regenerates `data/processed/features.parquet` with all 18 columns. **Default is `MAX_RECORDS = None`** (full ~12k records, ~30–60 min CPU-bound). Output `signals.h5` is also written for the CNN side; you don't need it.
 
-### 3. Train the SVM regression
+**Sparsity caveat — read this before training**: AI / LASI / S1–S4 require detecting the dicrotic notch and diastolic peak per cycle. On smoke-test data (50 records, 423 segments) only **~16% of segments yield non-NaN landmark features** — many MIMIC-derived 125 Hz cycles simply don't have a visible secondary peak. At full scale (~150k segments) that's still ~24k usable rows for SVM training, which is plenty. Pick one of these strategies before training:
+
+- **Drop NaN** (`df.dropna(subset=KACHUEE_FEATURES)`) — clean but trains on ~16% of rows.
+- **Median-impute** the four landmark-dependent features — uses the full ~80% of rows that have at least PTT + HR.
+- **Drop landmark features** entirely and train on the 6 reliable ones (PTT family + HR) — biggest sample, weakest feature set.
+
+I'd start with median-impute since the SVM benefits from more training data and Kachuee's published numbers are at full N.
+
+**Timing-offset caveat**: this dataset has a fixed ECG/PPG channel offset (PPG is ~80 ms ahead of physiological alignment). As a result:
+- `ptt_ms` (PTTp) ≈ 70 ms (vs Kachuee's typical 150–200 ms)
+- `pttf_ms` is **negative** (~-100 ms) because the PPG foot is detected before the ECG R-peak
+- `pttd_ms` is near zero
+
+This is a property of the data, not the extraction. The SVM will learn the relative scaling; do NOT try to "correct" individual features in isolation. Do verify your CV/test split is subject-level (it is, via `splits.json`).
+
+### 2. Train the SVM regression
 
 The paper trains two SVMs — one for SBP, one for DBP — on the 10-feature set. Hyperparameters from Kachuee et al. (2015):
 
@@ -149,7 +118,7 @@ for target in ('sbp', 'dbp'):
     print(f'{target} best params:', grid.best_params_)
 ```
 
-### 4. Threshold to 3-class + save outputs
+### 3. Threshold to 3-class + save outputs
 
 ```python
 # Predict on test set.
@@ -275,7 +244,7 @@ After your full sweep, expected ballpark for **subject-level evaluation** on the
 ## Coordination
 
 - **Branch off main** for your work; open a PR when ready. I'll review the feature-extraction code carefully (diastolic-peak detection is finicky and we don't want bugs to muddy the comparison).
-- **Document the AUROC probability choice** in the SVM commit message — see Section 4 above.
+- **Document the AUROC probability choice** in the SVM commit message — see Section 3 above.
 - **If you change `features.py`**, re-run notebook 03 too so the RF/XGBoost numbers reflect the same feature columns. Don't ship a state where my models trained on `OUR_FEATURES` and yours on `KACHUEE_FEATURES` if a comparable comparison can be made.
 - **Reach out** if anything's unclear, especially:
   - Diastolic-peak detection edge cases (some pulses don't have a clear secondary peak)
