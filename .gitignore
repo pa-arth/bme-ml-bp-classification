@@ -1,0 +1,21 @@
+# Data — large UCI .mat files and processed artifacts live in Drive, not git
+data/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.ipynb_checkpoints/
+
+# Jupyter cell outputs are stripped manually before commit; if you want
+# nbstripout, add it to a pre-commit hook
+*.nbconvert.ipynb
+
+# Models
+models/
+*.joblib
+
+# OS
+.DS_Store

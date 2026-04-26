@@ -1,0 +1,5 @@
+"""Cuff-less BP classification from ECG + PPG (UCI dataset)."""
+
+SAMPLE_RATE_HZ = 125
+WINDOW_SECONDS = 8
+WINDOW_SAMPLES = SAMPLE_RATE_HZ * WINDOW_SECONDS
