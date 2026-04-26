@@ -59,23 +59,28 @@ def make_splits(
 ) -> Splits:
     """Carve out a held-out test set of subjects, then GroupKFold the rest.
 
-    Stratifies the test split approximately by majority label per subject,
-    so the test set isn't accidentally all-Normal or all-Abnormal.
+    Stratifies the test split approximately by per-subject majority class
+    so the test set isn't accidentally missing a class. Works for binary
+    and multi-class labels — it iterates over whatever classes appear in
+    `label_col`.
     """
     features = add_subject_id(features)
-    subjects = features.groupby("subject_id")[label_col].agg(lambda s: int(s.mean() >= 0.5))
+    # Per-subject majority class (mode). For ties, pandas returns the
+    # smallest, which is fine for our purposes.
+    subjects = features.groupby("subject_id")[label_col].agg(
+        lambda s: int(s.mode().iloc[0])
+    )
     subjects = subjects.reset_index()
 
     gss = GroupShuffleSplit(n_splits=1, test_size=test_frac, random_state=random_state)
-    # Stratify-ish: split twice (one per class) and union, to preserve class
+    # Stratify-ish: split once per class and union, to preserve class
     # balance in the test fold without needing StratifiedGroupKFold (which
     # exists but has subtle behavior for severe imbalance).
     test_ids: list[str] = []
-    for cls in (0, 1):
+    for cls in sorted(subjects[label_col].unique()):
         cls_subjects = subjects[subjects[label_col] == cls]["subject_id"].to_numpy()
         if len(cls_subjects) < 2:
             continue
-        # Use the splitter on a synthetic frame with this class's groups.
         dummy_X = np.zeros((len(cls_subjects), 1))
         dummy_y = np.zeros(len(cls_subjects))
         for _, te in gss.split(dummy_X, dummy_y, groups=cls_subjects):

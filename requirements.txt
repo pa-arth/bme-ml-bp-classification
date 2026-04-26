@@ -2,6 +2,7 @@ numpy>=1.24
 scipy>=1.11
 pandas>=2.0
 scikit-learn>=1.3
+xgboost>=2.0
 matplotlib>=3.7
 neurokit2>=0.2.7
 h5py>=3.9
@@ -9,9 +10,10 @@ pyarrow>=14.0
 joblib>=1.3
 tqdm>=4.66
 
-# PyTorch is intentionally NOT pinned here — install it from the CUDA-12.1
-# wheel index so the 4070 gets GPU support. From the project root:
+# PyTorch is intentionally NOT pinned here — install it from the CUDA-12.4
+# wheel index so the 4070 gets GPU support (cu121 has no Python 3.13
+# wheels; switched to cu124). From the project root:
 #
-#   pip install --index-url https://download.pytorch.org/whl/cu121 torch
+#   pip install --index-url https://download.pytorch.org/whl/cu124 torch
 #
 # (notebooks/00_setup.ipynb does this automatically).

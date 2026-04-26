@@ -65,6 +65,7 @@ def process_record(
                 "sbp": float(lbl.sbp),
                 "dbp": float(lbl.dbp),
                 "label_binary": int(lbl.binary),
+                "label_3class": int(lbl.multiclass),
                 "n_beats": int(lbl.n_beats),
                 **feats,
             }

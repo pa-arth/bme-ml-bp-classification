@@ -58,15 +58,27 @@ class SegmentDataset(Dataset):
         return torch.from_numpy(sig), int(self.labels[i])
 
 
-def build_indices_for_subjects(h5_path, subject_ids: Iterable[str]) -> tuple[np.ndarray, np.ndarray]:
-    """Return (row_indices, labels) for all H5 rows whose subject_id is in `subject_ids`."""
+def subjects_to_row_indices(h5_path, subject_ids: Iterable[str]) -> np.ndarray:
+    """Return the row indices in `signals.h5` for any row whose subject_id
+    is in `subject_ids`. The caller looks up labels from the parquet —
+    parquet row index == h5 row index by construction in `pipeline.py`.
+    """
     wanted = set(subject_ids)
     with h5py.File(h5_path, "r") as f:
-        subj = f["subject_id"][:]  # bytes
-        labels = f["label_binary"][:]
+        subj = f["subject_id"][:]
     subj_str = np.array([s.decode("utf-8") if isinstance(s, bytes) else str(s) for s in subj])
     mask = np.fromiter((s in wanted for s in subj_str), dtype=bool, count=len(subj_str))
-    idx = np.nonzero(mask)[0]
+    return np.nonzero(mask)[0]
+
+
+def build_indices_for_subjects(h5_path, subject_ids: Iterable[str]) -> tuple[np.ndarray, np.ndarray]:
+    """Legacy binary-only helper. Kept for back-compat with notebooks that
+    still want labels from the h5 `label_binary` dataset. New code should
+    call `subjects_to_row_indices` and join labels from the parquet.
+    """
+    idx = subjects_to_row_indices(h5_path, subject_ids)
+    with h5py.File(h5_path, "r") as f:
+        labels = f["label_binary"][:]
     return idx, labels[idx]
 
 
@@ -184,13 +196,17 @@ def _val_f1(model: nn.Module, loader: DataLoader, device: torch.device) -> float
 
 @torch.no_grad()
 def predict_proba(model: nn.Module, loader: DataLoader, device: torch.device) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Returns (y_true, y_pred, y_proba_class1)."""
+    """Returns `(y_true, y_pred, y_proba)` where `y_proba` is the full
+    per-class softmax of shape `(n_samples, n_classes)`. Callers that
+    want a single-class score should index it themselves
+    (e.g. `y_proba[:, MULTICLASS_HYPERTENSIVE]`).
+    """
     model.eval()
     ys, preds, probas = [], [], []
     for x, y in loader:
         logits = model(x.to(device, non_blocking=True))
-        prob = F.softmax(logits, dim=1)[:, 1].cpu().numpy()
+        prob = F.softmax(logits, dim=1).cpu().numpy()
         preds.append(logits.argmax(dim=1).cpu().numpy())
         probas.append(prob)
         ys.append(y.numpy())
-    return np.concatenate(ys), np.concatenate(preds), np.concatenate(probas)
+    return np.concatenate(ys), np.concatenate(preds), np.concatenate(probas, axis=0)
