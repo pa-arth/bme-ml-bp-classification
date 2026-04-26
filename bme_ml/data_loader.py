@@ -21,27 +21,29 @@ import numpy as np
 
 
 def _is_hdf5(path: Path) -> bool:
+    """v7.3 .mat files are HDF5-backed but begin with a text header
+    ('MATLAB 7.3 MAT-file...'); the HDF5 superblock starts at offset 128.
+    Older v5–v7.2 .mat files begin with 'MATLAB 5.0 MAT-file'."""
     with open(path, "rb") as f:
-        return f.read(8) == b"\x89HDF\r\n\x1a\n"
+        head = f.read(10)
+    return head.startswith(b"MATLAB 7.3")
 
 
 def _iter_records_h5(path: Path) -> Iterator[np.ndarray]:
-    """Iterate `(3, N)` records from a v7.3 (HDF5) MATLAB file."""
+    """Iterate `(3, N)` records from a v7.3 (HDF5) MATLAB file.
+
+    UCI ships the cell array as `(N, 1)` (column vector) — flatten the
+    refs so the iterator works regardless of `(1, N)` vs `(N, 1)` layout.
+    """
     import h5py
 
     with h5py.File(path, "r") as f:
-        # Top-level cell array is stored as a Group; the cell variable itself
-        # is the only non-`#refs#` dataset. UCI distributes it as `Part_1`,
-        # `Part_2`, ...; fall back to scanning if naming changes.
         cell_keys = [k for k in f.keys() if not k.startswith("#")]
         if not cell_keys:
             raise RuntimeError(f"No cell variable found in {path}")
         cell_ref = f[cell_keys[0]]
-        # In HDF5-backed cell arrays, each cell entry is a reference; deref to
-        # the underlying dataset.
-        n_cells = cell_ref.shape[1] if cell_ref.ndim == 2 else cell_ref.shape[0]
-        for i in range(n_cells):
-            ref = cell_ref[0, i] if cell_ref.ndim == 2 else cell_ref[i]
+        refs = np.asarray(cell_ref[()]).reshape(-1)
+        for ref in refs:
             data = np.array(f[ref])
             # HDF5 storage is column-major-flipped relative to MATLAB; UCI
             # records come back as `(N, 3)`. Transpose to `(3, N)` to match
